@@ -1,0 +1,32 @@
+From 51e7fd42c0c44c584145f7ea503b85e4566bc2fd Mon Sep 17 00:00:00 2001
+From: Colin Stanfill <colin.stanfill@gmail.com>
+Date: Mon, 20 Feb 2017 15:24:14 -0500
+Subject: [PATCH] Patch server key generation to reuse private key
+
+---
+ crypto/sidh/sidhlib/kex.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/crypto/sidh/sidhlib/kex.c b/crypto/sidh/sidhlib/kex.c
+index 6188c66..812f119 100644
+--- a/crypto/sidh/sidhlib/kex.c
++++ b/crypto/sidh/sidhlib/kex.c
+@@ -14,6 +14,7 @@
+ extern const unsigned int splits_Alice[MAX_Alice];
+ extern const unsigned int splits_Bob[MAX_Bob];
+ 
++static const digit_t ALICE_STATIC_KEY[6] = {0x7555F5F687FC3406, 0x28F8780BCDA253F6, 0x76B9F312C37DB0EB, 0x67E3D7632A1F3351, 0xCA7543D201EFDE0B, 0x00008E91A1961795};
+ 
+ CRYPTO_STATUS KeyGeneration_A(unsigned char* pPrivateKeyA, unsigned char* pPublicKeyA, PCurveIsogenyStruct CurveIsogeny)
+ { // Alice's key-pair generation
+@@ -39,6 +40,7 @@ CRYPTO_STATUS KeyGeneration_A(unsigned char* pPrivateKeyA, unsigned char* pPubli
+         clear_words((void*)pPrivateKeyA, owords);
+         return Status;
+     }
++    memcpy(pPrivateKeyA, (unsigned char*)ALICE_STATIC_KEY, sizeof(ALICE_STATIC_KEY));
+ 
+     to_mont((digit_t*)CurveIsogeny->PA, (digit_t*)P);                               // Conversion of Alice's generators to Montgomery representation
+     to_mont(((digit_t*)CurveIsogeny->PA)+NWORDS_FIELD, ((digit_t*)P)+NWORDS_FIELD); 
+-- 
+2.1.4
+

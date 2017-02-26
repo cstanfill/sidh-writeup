@@ -1,0 +1,23 @@
+This directory now contains two more binaries: `local_attack` and `extract`.
+
+extract just does the work of computing an SSL pre-master secret given the
+client public and server private keys and is actually used in the attack.
+
+local_attack implements a bunch of tests done along the way to verify that the
+library is working how we think it is, and then simulates a local version of
+the attack described in secton 3 of [1] ("Adapative attack") to make sure we
+know how to do it, given an oracle.  All the heavy lifting is done by MakeEvil,
+which calls ladder2, an implementation (heavily cribbed from ladder_3pt)
+of the Montgomery ladder on one EC point for computing [n]P for a point P
+in Montgomery form.
+
+The functions from local_attack that did the actual work were then ported into
+the openssl patch for SIDH and given an interface accessible through s_client.
+
+Probably you want to build with `make ARCH=x64 ASM=false` but I'm not the boss
+of you.
+
+[1]   Steven D. Galbraith, Christophe Petit, Barak Shani, and Yan Bo Ti.
+      On the Security of Supersingular Isogeny Cryptosystems.
+      Advances in Cryptology - ASIACRYPT, 2016.
+      Full text available at https://eprint.iacr.org/2016/859.pdf

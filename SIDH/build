@@ -1,0 +1,3 @@
+#!/bin/sh
+make ARCH=x64 ASM=false extract
+make ARCH=x64 ASM=false local_attack

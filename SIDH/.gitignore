@@ -1,0 +1,4 @@
+*.o
+kex_test
+extract
+local_attack
